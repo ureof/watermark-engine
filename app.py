@@ -227,7 +227,10 @@ async def process_video_pipeline(req: ProcessRequest):
         font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
         if not os.path.exists(font_file):
             font_file = "C:/Windows/Fonts/arial.ttf" if os.name == "nt" else ""
-        font_param = f":fontfile='{font_file.replace(':', r'\:')}'" if os.path.exists(font_file) else ""
+        font_param = ""
+        if os.path.exists(font_file):
+            escaped_font_path = font_file.replace(":", "\\:")
+            font_param = f":fontfile='{escaped_font_path}'"
 
         font_size = max(24, int(height * 0.065))
         text_to_draw = custom_wm if custom_wm else "Watermark"

@@ -29,7 +29,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application files
 COPY --chown=user:user . .
 
-# Default port
+# Expose default port
 EXPOSE 7860
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+# Support dynamic PORT for Render, Koyeb, and Hugging Face
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-7860}"]
