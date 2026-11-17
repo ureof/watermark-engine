@@ -166,27 +166,61 @@ async def process_video_pipeline(req: ProcessRequest):
                 ACTIVE_JOBS[job_id]["progress"] = int(5 + pct * 0.25)
                 last_progress_update = now
 
-        if (req.media_message_id or req.tg_file_id) and tg_client:
-            logger.info(f"Downloading from Telegram (Chat {chat_id}, MediaMsg {req.media_message_id})...")
+        if tg_client:
+            logger.info(f"Downloading from Telegram (Chat {chat_id}, MediaMsg {req.media_message_id}, StatusMsg {msg_id})...")
             try:
                 media_msg = None
+                candidate_ids = []
+
                 if req.media_message_id:
-                    media_msg = await tg_client.get_messages(chat_id, ids=req.media_message_id)
-                if not media_msg or not media_msg.media:
-                    if msg_id:
-                        msg = await tg_client.get_messages(chat_id, ids=msg_id)
-                        if msg and msg.is_reply:
-                            media_msg = await msg.get_reply_message()
-                if not media_msg or not media_msg.media:
-                    async for m in tg_client.iter_messages(chat_id, limit=15):
-                        if m.media and (getattr(m, 'video', None) or getattr(m, 'document', None)):
+                    candidate_ids.extend([req.media_message_id, req.media_message_id - 1, req.media_message_id + 1])
+                if msg_id:
+                    candidate_ids.extend([msg_id - 1, msg_id - 2, msg_id - 3, msg_id + 1])
+
+                # Deduplicate while preserving order
+                seen = set()
+                clean_candidates = [x for x in candidate_ids if x > 0 and not (x in seen or seen.add(x))]
+                logger.info(f"Searching for media message in candidate IDs: {clean_candidates}")
+
+                # Priority 1: Fetch globally by message ID (No GetHistoryRequest, allowed for bot users)
+                for cid in clean_candidates:
+                    try:
+                        m = await tg_client.get_messages(None, ids=cid)
+                        if m and m.media:
                             media_msg = m
+                            logger.info(f"Found media message globally with ID {cid} (Type: {type(m.media).__name__})")
                             break
+                    except Exception as err:
+                        logger.debug(f"Global lookup for msg {cid} failed: {err}")
+
+                # Priority 2: Check reply-to from status message
+                if not media_msg and msg_id:
+                    try:
+                        st_msg = await tg_client.get_messages(None, ids=msg_id)
+                        if st_msg and st_msg.is_reply and st_msg.reply_to_msg_id:
+                            m = await tg_client.get_messages(None, ids=st_msg.reply_to_msg_id)
+                            if m and m.media:
+                                media_msg = m
+                                logger.info(f"Found media message via reply_to_msg_id ({st_msg.reply_to_msg_id})")
+                    except Exception as err:
+                        logger.debug(f"Reply-to lookup failed: {err}")
+
+                # Priority 3: Lookup with chat_id for candidates
+                if not media_msg:
+                    for cid in clean_candidates:
+                        try:
+                            m = await tg_client.get_messages(chat_id, ids=cid)
+                            if m and m.media:
+                                media_msg = m
+                                logger.info(f"Found media message with chat_id for ID {cid}")
+                                break
+                        except Exception:
+                            pass
 
                 if media_msg and media_msg.media:
                     await tg_client.download_media(media_msg, file=str(input_file), progress_callback=download_progress)
                 else:
-                    raise ValueError("Media message not found in chat context")
+                    raise ValueError(f"پیام حاوی ویدیو در چت یافت نشد (شناسه‌های بررسی شده: {clean_candidates}). لطفاً مجدداً ویدیو را ارسال فرمایید.")
             except Exception as e:
                 logger.warning(f"Direct media lookup failed ({e}), attempting fallback...")
                 if req.source_url:
