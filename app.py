@@ -36,7 +36,7 @@ logger = logging.getLogger("WatermarkEngine")
 # Credentials
 API_ID = int(os.environ.get("TELEGRAM_API_ID", "35537842"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "d97500b2596363b5ed28dc12af62ede8")
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8901084274:AAF23N3tAtvKNH5Y0j4Py69O3TJo3SPT9_w")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8901084274:AAGsXxNfC3zsVsHzbg_gsBQLUGFA3kn_8Ts")
 
 WORKDIR = Path("/tmp/watermark_jobs")
 WORKDIR.mkdir(parents=True, exist_ok=True)
