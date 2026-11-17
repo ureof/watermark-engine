@@ -38,7 +38,8 @@ API_ID = int(os.environ.get("TELEGRAM_API_ID", "35537842"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "d97500b2596363b5ed28dc12af62ede8")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8901084274:AAGsXxNfC3zsVsHzbg_gsBQLUGFA3kn_8Ts")
 
-WORKDIR = Path("/tmp/watermark_jobs")
+import tempfile
+WORKDIR = Path(os.environ.get("WORKDIR", tempfile.gettempdir())) / "watermark_jobs"
 WORKDIR.mkdir(parents=True, exist_ok=True)
 
 # Active jobs tracking
@@ -63,7 +64,7 @@ async def startup_event():
     global tg_client
     logger.info("Initializing Telethon Client for 2GB MTProto operations...")
     try:
-        session_path = "/tmp/bot_telethon_session"
+        session_path = str(WORKDIR / "bot_telethon_session")
         tg_client = TelegramClient(session_path, API_ID, API_HASH)
         await tg_client.start(bot_token=BOT_TOKEN)
         me = await tg_client.get_me()
@@ -83,6 +84,7 @@ class ProcessRequest(BaseModel):
     job_id: str
     chat_id: int
     status_message_id: Optional[int] = None
+    media_message_id: Optional[int] = None
     tg_file_id: Optional[str] = None
     limit_minutes: float = 10.0
     custom_wm: str = ""
@@ -164,16 +166,20 @@ async def process_video_pipeline(req: ProcessRequest):
                 ACTIVE_JOBS[job_id]["progress"] = int(5 + pct * 0.25)
                 last_progress_update = now
 
-        if req.tg_file_id and tg_client:
-            logger.info(f"Downloading from Telegram file_id (Chat {chat_id})...")
+        if (req.media_message_id or req.tg_file_id) and tg_client:
+            logger.info(f"Downloading from Telegram (Chat {chat_id}, MediaMsg {req.media_message_id})...")
             try:
-                msg = await tg_client.get_messages(chat_id, ids=msg_id)
                 media_msg = None
-                if msg and msg.is_reply:
-                    media_msg = await msg.get_reply_message()
+                if req.media_message_id:
+                    media_msg = await tg_client.get_messages(chat_id, ids=req.media_message_id)
                 if not media_msg or not media_msg.media:
-                    async for m in tg_client.iter_messages(chat_id, limit=5):
-                        if m.media:
+                    if msg_id:
+                        msg = await tg_client.get_messages(chat_id, ids=msg_id)
+                        if msg and msg.is_reply:
+                            media_msg = await msg.get_reply_message()
+                if not media_msg or not media_msg.media:
+                    async for m in tg_client.iter_messages(chat_id, limit=15):
+                        if m.media and (getattr(m, 'video', None) or getattr(m, 'document', None)):
                             media_msg = m
                             break
 
@@ -224,29 +230,39 @@ async def process_video_pipeline(req: ProcessRequest):
         wm_h = int(height * 0.28)
 
         # Detect font path
-        font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if not os.path.exists(font_file):
-            font_file = "C:/Windows/Fonts/arial.ttf" if os.name == "nt" else ""
+        font_candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        font_file = next((f for f in font_candidates if os.path.exists(f)), "")
         font_param = ""
-        if os.path.exists(font_file):
+        if font_file:
             escaped_font_path = font_file.replace(":", "\\:")
             font_param = f":fontfile='{escaped_font_path}'"
 
         font_size = max(24, int(height * 0.065))
-        text_to_draw = custom_wm if custom_wm else "Watermark"
-        safe_text = text_to_draw.replace(":", r"\:").replace("'", "").replace("%", r"\%")
+        safe_text = custom_wm.replace(":", r"\:").replace("'", "").replace("%", r"\%")
 
         # Filter Complex:
         # 1. Crop watermark area and apply heavy smooth Gaussian boxblur (boxblur=24:6)
         # 2. Overlay blurred box over original video
-        # 3. Draw user's custom watermark with vibrant electric purple color (0xA855F7) and crisp border
-        filter_complex = (
-            f"[0:v] split [main][to_blur]; "
-            f"[to_blur] crop={wm_w}:{wm_h}:{wm_x}:{wm_y}, boxblur=24:6 [blurred]; "
-            f"[main][blurred] overlay={wm_x}:{wm_y} [bg]; "
-            f"[bg] drawtext=text='{safe_text}'{font_param}:x=(w-text_w)/2:y={wm_y}+({wm_h}-text_h)/2:"
-            f"fontsize={font_size}:fontcolor=0xA855F7:shadowcolor=black@0.9:shadowx=2:shadowy=2:borderw=1.5:bordercolor=black@0.7"
-        )
+        # 3. Draw user's custom watermark with vibrant electric purple color (0xA855F7) and crisp border (if provided)
+        if custom_wm:
+            filter_complex = (
+                f"[0:v] split [main][to_blur]; "
+                f"[to_blur] crop={wm_w}:{wm_h}:{wm_x}:{wm_y}, boxblur=24:6 [blurred]; "
+                f"[main][blurred] overlay={wm_x}:{wm_y} [bg]; "
+                f"[bg] drawtext=text='{safe_text}'{font_param}:x=(w-text_w)/2:y={wm_y}+({wm_h}-text_h)/2:"
+                f"fontsize={font_size}:fontcolor=0xA855F7:shadowcolor=black@0.9:shadowx=2:shadowy=2:borderw=1.5:bordercolor=black@0.7"
+            )
+        else:
+            filter_complex = (
+                f"[0:v] split [main][to_blur]; "
+                f"[to_blur] crop={wm_w}:{wm_h}:{wm_x}:{wm_y}, boxblur=24:6 [blurred]; "
+                f"[main][blurred] overlay={wm_x}:{wm_y}"
+            )
 
         # If processing whole video
         if limit_min <= 0 or splice_sec >= duration_sec - 10:
