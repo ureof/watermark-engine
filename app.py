@@ -1,11 +1,14 @@
 """
 =============================================================================
-WATERMARK REMOVER — HUGGING FACE BACKEND ENGINE (PYTHON / FFMPEG / TELETHON)
+WATERMARK REPLACEMENT ENGINE (BLUR + PURPLE WATERMARK + 2GB TELETHON)
 =============================================================================
 Architecture:
 - FastAPI Web Server (Port 7860)
 - Telethon MTProto Client (Full 2 GB Upload & Download Speed)
-- FFmpeg Adaptive Inpainting & Lossless Segment Splicer
+- FFmpeg Video Engine:
+  * Blur Effect over Previous Watermark Region
+  * Electric Purple (0xA855F7) Watermark Text Overlay
+  * Temporal Splicing (First N Minutes Processed, Remainder Lossless -c copy)
 - Cloudflare Keep-Alive Endpoint (/health)
 =============================================================================
 """
@@ -41,7 +44,7 @@ WORKDIR.mkdir(parents=True, exist_ok=True)
 # Active jobs tracking
 ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
 
-app = FastAPI(title="Watermark Remover Backend", version="10.0.0")
+app = FastAPI(title="Watermark Blur & Purple Overlay Engine", version="11.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -148,7 +151,7 @@ async def process_video_pipeline(req: ProcessRequest):
         # Step 1: Download the video
         await update_tg_status(
             chat_id, msg_id,
-            "📥 <b>در حال دانلود ویدیوی حجیم از سرورهای پرسرعت تلگرام...</b>\n<i>لطفاً چند لحظه شکیبا باشید.</i>"
+            "📥 <b>در حال دانلود ویدیو از سرورهای تلگرام...</b>\n<i>پشتیبانی کامل از فایل‌های بالای ۱ گیگابایت</i>"
         )
 
         last_progress_update = 0
@@ -163,15 +166,12 @@ async def process_video_pipeline(req: ProcessRequest):
 
         if req.tg_file_id and tg_client:
             logger.info(f"Downloading from Telegram file_id (Chat {chat_id})...")
-            # Try to fetch message media or download via telethon
             try:
-                # If status message is a reply or we can get media
                 msg = await tg_client.get_messages(chat_id, ids=msg_id)
                 media_msg = None
                 if msg and msg.is_reply:
                     media_msg = await msg.get_reply_message()
                 if not media_msg or not media_msg.media:
-                    # Search recent messages in chat for the media
                     async for m in tg_client.iter_messages(chat_id, limit=5):
                         if m.media:
                             media_msg = m
@@ -182,7 +182,7 @@ async def process_video_pipeline(req: ProcessRequest):
                 else:
                     raise ValueError("Media message not found in chat context")
             except Exception as e:
-                logger.warning(f"Direct media lookup failed ({e}), attempting file_id / URL fallback...")
+                logger.warning(f"Direct media lookup failed ({e}), attempting fallback...")
                 if req.source_url:
                     import requests
                     with requests.get(req.source_url, stream=True) as r:
@@ -209,44 +209,55 @@ async def process_video_pipeline(req: ProcessRequest):
 
         await update_tg_status(
             chat_id, msg_id,
-            f"⚙️ <b>در حال پاکسازی هوشمند واترمارک تا دقیقه {limit_min if limit_min > 0 else 'انتهای ویدیو'}...</b>\n"
-            f"📊 ابعاد: <code>{width}x{height}</code> | حجم: <code>{file_size_mb:.1f} MB</code>\n"
-            f"🧠 الگوریتم: <i>Adaptive Delogo & Stroke Inpainting</i>"
+            f"🟣 <b>در حال اعمال افکت بلور و درج واترمارک بنفش...</b>\n"
+            f"⏱ <b>بازه:</b> تا دقیقه {limit_min if limit_min > 0 else 'انتهای ویدیو'}\n"
+            f"📊 <b>ابعاد:</b> <code>{width}x{height}</code> | حجم: <code>{file_size_mb:.1f} MB</code>\n"
+            f"✨ <i>مابقی ویدیو بدون کوچکترین تغییر و با سرعت فوق‌العاده متصل می‌شود.</i>"
         )
-        ACTIVE_JOBS[job_id]["stage"] = "پاکسازی و ادغام ویدیو"
+        ACTIVE_JOBS[job_id]["stage"] = "بلور و درج واترمارک بنفش"
         ACTIVE_JOBS[job_id]["progress"] = 35
 
-        # Watermark region: Bottom 33% of frame, center 70% width
+        # Watermark region: Bottom 30% of frame, center 70% width
         wm_x = int(width * 0.16)
         wm_y = int(height * 0.68)
         wm_w = int(width * 0.68)
         wm_h = int(height * 0.28)
 
-        vf_filters = [f"delogo=x={wm_x}:y={wm_y}:w={wm_w}:h={wm_h}:show=0"]
+        # Detect font path
+        font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        if not os.path.exists(font_file):
+            font_file = "C:/Windows/Fonts/arial.ttf" if os.name == "nt" else ""
+        font_param = f":fontfile='{font_file.replace(':', r'\:')}'" if os.path.exists(font_file) else ""
 
-        if custom_wm:
-            safe_text = custom_wm.replace(":", "\\:").replace("'", "")
-            vf_filters.append(
-                f"drawtext=text='{safe_text}':x=(w-text_w)/2:y=h-th-25:"
-                f"fontsize=24:fontcolor=white@0.85:shadowcolor=black@0.7:shadowx=2:shadowy=2"
-            )
+        font_size = max(24, int(height * 0.065))
+        text_to_draw = custom_wm if custom_wm else "Watermark"
+        safe_text = text_to_draw.replace(":", r"\:").replace("'", "").replace("%", r"\%")
 
-        vf_chain = ",".join(vf_filters)
+        # Filter Complex:
+        # 1. Crop watermark area and apply heavy smooth Gaussian boxblur (boxblur=24:6)
+        # 2. Overlay blurred box over original video
+        # 3. Draw user's custom watermark with vibrant electric purple color (0xA855F7) and crisp border
+        filter_complex = (
+            f"[0:v] split [main][to_blur]; "
+            f"[to_blur] crop={wm_w}:{wm_h}:{wm_x}:{wm_y}, boxblur=24:6 [blurred]; "
+            f"[main][blurred] overlay={wm_x}:{wm_y} [bg]; "
+            f"[bg] drawtext=text='{safe_text}'{font_param}:x=(w-text_w)/2:y={wm_y}+({wm_h}-text_h)/2:"
+            f"fontsize={font_size}:fontcolor=0xA855F7:shadowcolor=black@0.9:shadowx=2:shadowy=2:borderw=1.5:bordercolor=black@0.7"
+        )
 
-        # Check if full video needs processing or segment splicing
+        # If processing whole video
         if limit_min <= 0 or splice_sec >= duration_sec - 10:
-            # Clean entire video
-            logger.info("Processing entire video with delogo...")
+            logger.info("Processing entire video with blur + purple watermark...")
             cmd = [
                 "ffmpeg", "-y", "-i", str(input_file),
-                "-vf", vf_chain,
+                "-filter_complex", filter_complex,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                 "-c:a", "copy",
                 str(output_file)
             ]
             subprocess.run(cmd, check=True)
         else:
-            # Segment A: 0 to splice_sec with inpainting
+            # Segment A: 0 to splice_sec with blur + purple overlay
             part_a = job_dir / "part_a.mp4"
             part_b = job_dir / "part_b.mp4"
             list_txt = job_dir / "concat_list.txt"
@@ -255,7 +266,7 @@ async def process_video_pipeline(req: ProcessRequest):
             cmd_a = [
                 "ffmpeg", "-y", "-i", str(input_file),
                 "-t", str(splice_sec),
-                "-vf", vf_chain,
+                "-filter_complex", filter_complex,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                 "-c:a", "copy",
                 str(part_a)
@@ -294,8 +305,8 @@ async def process_video_pipeline(req: ProcessRequest):
         # Step 4: Upload Cleaned Video to Telegram Chat (Up to 2 GB)
         await update_tg_status(
             chat_id, msg_id,
-            f"📤 <b>در حال ارسال مستقیم ویدیوی تمیز به چت ({out_size_mb:.1f} MB)...</b>\n"
-            f"<i>این مرحله با نهایت سرعت در حال انجام است.</i>"
+            f"📤 <b>در حال ارسال مستقیم ویدیوی جدید به چت ({out_size_mb:.1f} MB)...</b>\n"
+            f"<i>واترمارک قبلی بلور شد و واترمارک بنفش شما قرار گرفت.</i>"
         )
         ACTIVE_JOBS[job_id]["stage"] = "ارسال به تلگرام"
         ACTIVE_JOBS[job_id]["progress"] = 80
@@ -311,11 +322,12 @@ async def process_video_pipeline(req: ProcessRequest):
                 last_up_update = now
 
         caption_text = (
-            f"✅ <b>ویدیوی شما با موفقیت آماده شد!</b>\n\n"
+            f"✅ <b>ویدیوی شما آماده شد!</b>\n\n"
             f"📁 <b>فایل:</b> <code>{req.file_name}</code>\n"
-            f"⏱ <b>بازه پاکسازی:</b> تا دقیقه {limit_min if limit_min > 0 else 'کل'}\n"
-            f"🏷 <b>واترمارک:</b> {custom_wm if custom_wm else 'کاملاً پاکسازی شد'}\n"
-            f"📊 <b>کیفیت صدا و تصویر:</b> ۱۰۰٪ دست‌نخورده و بدون افت کیفیت"
+            f"⏱ <b>بازه تغییر:</b> تا دقیقه {limit_min if limit_min > 0 else 'کل'}\n"
+            f"✨ <b>افکت:</b> بلور ملایم روی واترمارک قبلی\n"
+            f"🟣 <b>واترمارک جدید:</b> <code>{custom_wm if custom_wm else 'بدون متن'}</code> (رنگ بنفش)\n"
+            f"🔊 <b>صدا و تصویر مابقی ویدیو:</b> ۱۰۰٪ دست‌نخورده و بدون افت کیفیت"
         )
 
         if tg_client:
@@ -333,7 +345,7 @@ async def process_video_pipeline(req: ProcessRequest):
                         h=height,
                         supports_streaming=True
                     ),
-                    DocumentAttributeFilename(file_name=f"cleaned_{req.file_name}")
+                    DocumentAttributeFilename(file_name=f"blurred_{req.file_name}")
                 ]
             )
 
@@ -373,21 +385,21 @@ async def dashboard():
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>Watermark Removal Engine (Hugging Face Core)</title>
+  <title>Watermark Blur & Purple Engine</title>
   <style>
     body {{ background: #0b0f19; color: #f1f5f9; font-family: Tahoma, sans-serif; padding: 30px; text-align: center; }}
     .card {{ background: #1e293b; border-radius: 16px; padding: 24px; max-width: 600px; margin: 0 auto; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }}
-    h1 {{ color: #38bdf8; margin-bottom: 8px; }}
-    .badge {{ background: #10b981; color: #fff; padding: 4px 12px; border-radius: 99px; font-size: 13px; font-weight: bold; }}
+    h1 {{ color: #a855f7; margin-bottom: 8px; }}
+    .badge {{ background: #9333ea; color: #fff; padding: 4px 12px; border-radius: 99px; font-size: 13px; font-weight: bold; }}
     .stats {{ display: flex; justify-content: space-around; margin: 20px 0; }}
-    .stat-val {{ font-size: 24px; font-weight: bold; color: #38bdf8; }}
+    .stat-val {{ font-size: 24px; font-weight: bold; color: #c084fc; }}
   </style>
 </head>
 <body>
   <div class="card">
     <span class="badge">● آنلاین و فعال</span>
-    <h1>موتور پردازش ویدیوی حجیم (هوش مصنوعی)</h1>
-    <p>متصل به Cloudflare Workers و Telegram MTProto برای فایل‌های تا ۱ گیگابایت</p>
+    <h1>موتور بلور و واترمارک بنفش (هوشمند)</h1>
+    <p>متصل به Cloudflare Workers برای ویدیوهای بالای ۱ گیگابایت</p>
     <div class="stats">
       <div><div class="stat-val">{active}</div><div>در حال پردازش</div></div>
       <div><div class="stat-val">{completed}</div><div>تکمیل شده</div></div>
@@ -400,10 +412,11 @@ async def dashboard():
 
 @app.get("/health")
 async def health_check():
-    """Ping endpoint for Cloudflare Workers Cron Trigger to keep the Space awake 24/7"""
+    """Keep-alive ping endpoint for Cloudflare Workers Cron Trigger"""
     return {
         "status": "alive",
-        "service": "Watermark Engine (Python / Hugging Face)",
+        "service": "Watermark Blur & Purple Engine",
+        "mode": "blur_plus_purple_overlay",
         "timestamp": time.time(),
         "active_jobs": sum(1 for j in ACTIVE_JOBS.values() if j.get("status") == "processing"),
         "telegram_connected": bool(tg_client and tg_client.is_connected())
@@ -412,13 +425,13 @@ async def health_check():
 
 @app.post("/api/process")
 async def start_process(req: ProcessRequest, background_tasks: BackgroundTasks):
-    logger.info(f"Received process request for job: {req.job_id} (chat: {req.chat_id})")
+    logger.info(f"Received process request: job={req.job_id}, limit={req.limit_minutes}m, wm='{req.custom_wm}'")
     background_tasks.add_task(process_video_pipeline, req)
     return {
         "ok": True,
         "job_id": req.job_id,
         "status": "queued",
-        "message": "Video processing initiated successfully on Hugging Face Engine."
+        "message": "Blur & Purple watermark process initiated."
     }
 
 
@@ -435,7 +448,7 @@ async def download_file(job_id: str):
     return FileResponse(
         file_path,
         media_type="video/mp4",
-        filename=f"cleaned_{job.get('file_name', 'video.mp4')}"
+        filename=f"blurred_{job.get('file_name', 'video.mp4')}"
     )
 
 
