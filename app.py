@@ -158,13 +158,25 @@ async def process_video_pipeline(req: ProcessRequest):
 
         last_progress_update = 0
 
-        def download_progress(current, total):
+        async def update_dl_msg(current, total):
             nonlocal last_progress_update
             now = time.time()
-            if now - last_progress_update >= 3.0:
+            if now - last_progress_update >= 3.5:
                 pct = int((current / total) * 100) if total else 0
+                cur_mb = current / (1024 * 1024)
+                tot_mb = total / (1024 * 1024)
                 ACTIVE_JOBS[job_id]["progress"] = int(5 + pct * 0.25)
                 last_progress_update = now
+                if msg_id:
+                    text = (
+                        f"📥 <b>در حال دانلود ویدیو از تلگرام...</b>\n"
+                        f"📊 پیشرفت: <b>{pct}%</b> (<code>{cur_mb:.1f} MB</code> از <code>{tot_mb:.1f} MB</code>)\n"
+                        f"<i>پشتیبانی تا ۲ گیگابایت - لطفاً چند لحظه صبر کنید...</i>"
+                    )
+                    await update_tg_status(chat_id, msg_id, text)
+
+        def download_progress(current, total):
+            asyncio.create_task(update_dl_msg(current, total))
 
         if tg_client:
             logger.info(f"Downloading from Telegram (Chat {chat_id}, MediaMsg {req.media_message_id}, StatusMsg {msg_id})...")
@@ -302,9 +314,9 @@ async def process_video_pipeline(req: ProcessRequest):
         if limit_min <= 0 or splice_sec >= duration_sec - 10:
             logger.info("Processing entire video with blur + purple watermark...")
             cmd = [
-                "ffmpeg", "-y", "-i", str(input_file),
+                "ffmpeg", "-y", "-threads", "2", "-i", str(input_file),
                 "-filter_complex", filter_complex,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "23",
                 "-c:a", "copy",
                 str(output_file)
             ]
@@ -317,10 +329,10 @@ async def process_video_pipeline(req: ProcessRequest):
 
             logger.info(f"Encoding Part A (0s to {splice_sec}s)...")
             cmd_a = [
-                "ffmpeg", "-y", "-i", str(input_file),
+                "ffmpeg", "-y", "-threads", "2", "-i", str(input_file),
                 "-t", str(splice_sec),
                 "-filter_complex", filter_complex,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "fastdecode", "-crf", "23",
                 "-c:a", "copy",
                 str(part_a)
             ]
@@ -366,13 +378,24 @@ async def process_video_pipeline(req: ProcessRequest):
 
         last_up_update = 0
 
-        def upload_progress(current, total):
+        async def update_up_msg(current, total):
             nonlocal last_up_update
             now = time.time()
-            if now - last_up_update >= 3.0:
+            if now - last_up_update >= 3.5:
                 pct = int((current / total) * 100) if total else 0
+                c_mb = current / (1024 * 1024)
+                t_mb = total / (1024 * 1024)
                 ACTIVE_JOBS[job_id]["progress"] = int(80 + pct * 0.18)
                 last_up_update = now
+                if msg_id:
+                    text = (
+                        f"📤 <b>در حال ارسال ویدیوی جدید به چت...</b>\n"
+                        f"📊 پیشرفت: <b>{pct}%</b> (<code>{c_mb:.1f} MB</code> از <code>{t_mb:.1f} MB</code>)"
+                    )
+                    await update_tg_status(chat_id, msg_id, text)
+
+        def upload_progress(current, total):
+            asyncio.create_task(update_up_msg(current, total))
 
         caption_text = (
             f"✅ <b>ویدیوی شما آماده شد!</b>\n\n"
