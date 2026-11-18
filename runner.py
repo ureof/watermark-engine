@@ -72,19 +72,25 @@ async def update_tg_status(client: TelegramClient, chat_id: int, message_id: int
 
 async def main():
     # 1. Parse client payload from GitHub Event
-    payload_str = os.environ.get("CLIENT_PAYLOAD", "{}")
-    logger.info(f"Raw Client Payload: {payload_str}")
-    try:
-        payload = json.loads(payload_str)
-    except Exception:
-        # Fallback: check GITHUB_EVENT_PATH
-        event_path = os.environ.get("GITHUB_EVENT_PATH")
-        if event_path and os.path.exists(event_path):
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    payload = {}
+    if event_path and os.path.exists(event_path):
+        try:
             with open(event_path, "r", encoding="utf-8") as f:
                 event_data = json.load(f)
-                payload = event_data.get("client_payload", {})
-        else:
-            payload = {}
+                logger.info(f"Event keys from GITHUB_EVENT_PATH: {list(event_data.keys())}")
+                payload = event_data.get("client_payload") or {}
+        except Exception as e:
+            logger.warning(f"Failed to read GITHUB_EVENT_PATH: {e}")
+
+    if not payload:
+        payload_str = os.environ.get("CLIENT_PAYLOAD", "{}")
+        try:
+            payload = json.loads(payload_str)
+        except Exception:
+            pass
+
+    logger.info(f"Resolved Payload: {payload}")
 
     job_id = payload.get("job_id", f"job_{int(time.time())}")
     chat_id = int(payload.get("chat_id", 0))
