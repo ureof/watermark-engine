@@ -24,17 +24,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install System Dependencies (FFmpeg, DejaVu, Noto Fonts)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ffmpeg \
-            fonts-dejavu-core \
-            fonts-noto-core \
-            fonts-freefarsi \
-            libsm6 \
-            libxext6
-
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -42,7 +31,6 @@ jobs:
 
       - name: Execute Video Engine
         env:
-          CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
           TELEGRAM_API_ID: "35537842"
           TELEGRAM_API_HASH: "d97500b2596363b5ed28dc12af62ede8"
           TELEGRAM_BOT_TOKEN: "8901084274:AAGsXxNfC3zsVsHzbg_gsBQLUGFA3kn_8Ts"
