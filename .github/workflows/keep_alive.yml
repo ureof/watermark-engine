@@ -1,0 +1,16 @@
+name: 24/7 Render Keep-Alive Pinger
+
+on:
+  schedule:
+    # Run every 10 minutes 24/7 to prevent Render Free tier from sleeping
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Health Endpoint
+        run: |
+          echo "Pinging Render backend to keep it awake 24/7..."
+          curl -f -s -m 30 https://watermark-engine-4wyu.onrender.com/health || true
